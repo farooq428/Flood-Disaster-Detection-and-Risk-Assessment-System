@@ -50,7 +50,6 @@ feature_names.pkl
 scalar.pkl
 rainfall.csv
 
-
 # Optional large or local data files
 # Uncomment if you don't want raw dataset files tracked
 # dataset/rainfall.csv
