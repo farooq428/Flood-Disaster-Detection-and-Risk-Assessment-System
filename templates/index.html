@@ -2,57 +2,136 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Rainfall AI Dashboard</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flood Risk AI Map</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div class="glass-container">
-        <aside class="sidebar">
-            <div class="logo">Rainfall<span>AI</span></div>
+    <div class="map-wrapper">
+        <div id="full-map"></div>
+        
+        <aside class="floating-dashboard">
+            <div class="logo">
+                <span>FloodRisk<span class="text-primary">Map</span></span>
+            </div>
+
             <form method="POST" class="search-form">
-                <label>Pakistan City</label>
-                <input list="pak-cities" name="city" placeholder="Search..." value="{{ city }}">
-                <datalist id="pak-cities">
-                    {% for c in cities %}<option value="{{ c }}">{% endfor %}
-                </datalist>
-                <button type="submit">Update View</button>
+                <input type="hidden" name="lat" id="lat">
+                <input type="hidden" name="lon" id="lon">
+                <div class="search-input-group">
+                    <input list="pak-cities" name="city" id="cityInput" placeholder="Search City or click anywhere on the map..." value="{{ city if not city.startswith('Location') else '' }}" required>
+                    <datalist id="pak-cities">
+                        {% for c in cities %}<option value="{{ c }}">{% endfor %}
+                    </datalist>
+                </div>
+                <button type="submit" class="btn-primary">Analyze Location</button>
             </form>
-            <div class="date-display">{{ today }}</div>
-        </aside>
 
-        <main class="main-content">
             {% if error %}
-            <div class="error-msg">City data unavailable for "{{ city }}".</div>
+            <div class="error-card mt-3">
+                <p>Location not found. Click on the map to select a valid coordinate in Pakistan.</p>
+            </div>
             {% else %}
-            <header><h1>{{ city }}</h1></header>
+            
+            <div class="dashboard-content mt-3">
+                <h2 class="location-title">{{ city }}</h2>
+                <div class="date-display">{{ today }}</div>
+                
+                <div class="card risk-card {{ color_class }}">
+                    <div class="card-header">Flood & Disaster Risk</div>
+                    <div class="risk-value">
+                        <span class="val">{{ risk_percentage }}</span><span class="unit">%</span>
+                    </div>
+                    <div class="impact-badge">{{ impact_text }}</div>
+                </div>
 
-            <section class="prediction-hero">
-                <div class="value-box">
-                    <span class="val">{{ prediction }}</span><span class="unit">%</span>
-                    <p>Rainfall Probability</p>
-                    <div class="status-badge" style="background:{% if prediction > 70 %}#fee2e2; color:#b91c1c;{% elif prediction > 30 %}#fef3c7; color:#92400e;{% else %}#dcfce7; color:#166534;{% endif %}; padding:5px 15px; border-radius:20px; font-size:12px; font-weight:bold; display:inline-block; margin-top:10px;">
-                        {% if prediction > 70 %}⚠️ HIGH RISK{% elif prediction > 30 %}☁️ MODERATE{% else %}☀️ LOW RISK{% endif %}
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="s-label">TEMP</div>
+                        <div class="s-val">{{ temp }}°C</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="s-label">HUMIDITY</div>
+                        <div class="s-val">{{ humidity }}%</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="s-label">RAINFALL</div>
+                        <div class="s-val">{{ rainfall }} mm</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="s-label">DISCHARGE</div>
+                        <div class="s-val">{{ river_discharge }} m³/s</div>
                     </div>
                 </div>
-                <div class="quick-stats">
-                    <div class="stat"><span>TEMP</span><strong>{{ temp }}°C</strong></div>
-                    <div class="stat"><span>HUMIDITY</span><strong>{{ humidity }}%</strong></div>
-                    <div class="stat"><span>WIND</span><strong>{{ wind }} m/s</strong></div>
-                </div>
-            </section>
 
-            <section class="chart-section" style="background:white; padding:20px; border-radius:20px; margin-top:20px;">
-                <h3 style="color:#64748b; font-size:14px; margin-bottom:15px;">5-Day Temperature Trend</h3>
-                <canvas id="mainChart" height="180"></canvas>
-            </section>
+                <div class="card chart-card">
+                    <div class="card-header">5-Day Temperature Forecast</div>
+                    <div class="chart-wrapper">
+                        <canvas id="mainChart"></canvas>
+                    </div>
+                </div>
+            </div>
             {% endif %}
-        </main>
+        </aside>
     </div>
 
     <script>
+        // Full Screen Map Initialization
+        const initLat = {{ map_lat if map_lat else 30.3753 }};
+        const initLon = {{ map_lon if map_lon else 69.3451 }};
+        const zoomLvl = {{ '12' if city and not error else '6' }};
+        
+        const map = L.map('full-map', { zoomControl: false }).setView([initLat, initLon], zoomLvl);
+        
+        // Add zoom control to top right so it's not hidden by dashboard
+        L.control.zoom({ position: 'topright' }).addTo(map);
+        
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 18,
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        {% if not error and city %}
+        // Add a marker for the current location with risk color
+        let markerColor = '#10b981'; // low
+        {% if color_class == 'high-risk' %} markerColor = '#ef4444'; {% endif %}
+        {% if color_class == 'mod-risk' %} markerColor = '#f59e0b'; {% endif %}
+        
+        const circle = L.circle([initLat, initLon], {
+            color: markerColor,
+            fillColor: markerColor,
+            fillOpacity: 0.4,
+            radius: 5000 // 5km radius
+        }).addTo(map);
+        
+        circle.bindPopup("<b>{{ city }}</b><br>{{ impact_text }}").openPopup();
+        {% endif %}
+
+        // Handle Map Clicks
+        map.on('click', function(e) {
+            document.getElementById('lat').value = e.latlng.lat;
+            document.getElementById('lon').value = e.latlng.lng;
+            document.getElementById('cityInput').value = `Lat: ${e.latlng.lat.toFixed(4)}, Lon: ${e.latlng.lng.toFixed(4)}`;
+            
+            const btn = document.querySelector('.btn-primary');
+            btn.innerHTML = 'Assessing...';
+            btn.style.opacity = '0.7';
+            
+            document.querySelector('.search-form').submit();
+        });
+
+        {% if not error %}
+        // Chart Initialization
         const ctx = document.getElementById('mainChart').getContext('2d');
         const fData = {{ forecast | tojson if forecast else '[]' }};
+        
+        Chart.defaults.font.family = 'Outfit';
+        Chart.defaults.color = '#475569';
+        
         new Chart(ctx, {
             type: 'line',
             data: {
@@ -60,16 +139,25 @@
                 datasets: [{
                     label: 'Temp (°C)',
                     data: fData.map(d => d.temp),
-                    borderColor: '#6366f1',
-                    backgroundColor: 'rgba(99,102,241,0.1)',
-                    fill: true, tension: 0.4
+                    borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                    borderWidth: 2,
+                    pointRadius: 3,
+                    fill: true, 
+                    tension: 0.4
                 }]
             },
             options: { 
+                responsive: true,
+                maintainAspectRatio: false,
                 plugins: { legend: { display: false } },
-                scales: { x: { grid: { display: false } }, y: { beginAtZero: false } }
+                scales: { 
+                    x: { grid: { display: false } }, 
+                    y: { grid: { color: 'rgba(0, 0, 0, 0.05)' } } 
+                }
             }
         });
+        {% endif %}
     </script>
 </body>
 </html>

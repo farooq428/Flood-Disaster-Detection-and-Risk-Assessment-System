@@ -1,39 +1,51 @@
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
+import numpy as np
 from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, classification_report
 import joblib
+import os
 
-# Phase 1: Raw Data Compilation [cite: 5]
-try:
-    df = pd.read_csv("./dataset/rainfall.csv")
-except FileNotFoundError:
-    print("Error: Place 'rainfall.csv' in the project folder.")
-    exit()
+print("Loading dataset...")
+df = pd.read_csv("dataset/pak_flood_data.csv")
 
-# Phase 2: Preprocessing & Feature Selection [cite: 6, 9]
-df['RainTomorrow'] = (df['Rainfall'].shift(-1) >= 1).astype(int)
-df = df.dropna()
-
-features = ["MinTemp", "MaxTemp", "Rainfall", "Evaporation", "Sunshine", 
-            "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm", "Humidity9am", 
-            "Humidity3pm", "Pressure9am", "Pressure3pm", "Cloud9am", "Cloud3pm", "Temp9am", "Temp3pm"]
+# Features to use for training
+features = [
+    'elevation', 
+    'river_discharge', 
+    'river_discharge_mean', 
+    'river_discharge_median', 
+    'river_discharge_max', 
+    'river_discharge_min'
+]
 
 X = df[features]
-y = df['RainTomorrow']
+y = df['flood_impact'] # 0: Safe, 1: Moderate, 2: Severe
 
-# 80% Training - 20% Testing [cite: 11, 184, 186]
+# Split data
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
+# Scale features
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
 
-# Phase 3: Random Forest Algorithm 
-model = RandomForestClassifier(n_estimators=100, random_state=42)
+# Train Model
+print("Training RandomForestClassifier...")
+model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
 model.fit(X_train_scaled, y_train)
 
-# Save Best Models [cite: 24]
+# Evaluate
+y_pred = model.predict(X_test_scaled)
+acc = accuracy_score(y_test, y_pred)
+print(f"Model Accuracy: {acc * 100:.2f}%")
+print("Classification Report:")
+print(classification_report(y_test, y_pred))
+
+# Save artifacts
 joblib.dump(model, "model.pkl")
 joblib.dump(scaler, "scaler.pkl")
 joblib.dump(features, "feature_names.pkl")
-print("Model Components Saved Successfully.")
+
+print("Successfully saved model.pkl, scaler.pkl, and feature_names.pkl!")
