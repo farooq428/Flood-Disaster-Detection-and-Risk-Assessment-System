@@ -44,16 +44,17 @@ Thumbs.db
 *.csv (very large datasets)
 *.zip
 *.exe
-/dataset
+
 model.pkl
 feature_names.pkl
-scalar.pkl
-rainfall.csv
+scaler.pkl
+
+test_*.py
 
 # Optional large or local data files
 # Uncomment if you don't want raw dataset files tracked
-# dataset/rainfall.csv
-# rainfall.csv
+# dataset/pak_flood_data.csv
+# pak_flood_data.csv
 
 # Node modules (if added later)
 node_modules/

@@ -3,161 +3,348 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Flood Risk AI Map</title>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <title>FloodRisk Pakistan – AI Flood Prediction & 15-Day Forecast</title>
+    <meta name="description" content="Real-time AI-powered flood risk assessment and 15-day disaster prediction for Pakistan cities and villages using live weather and hydrological data.">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div class="map-wrapper">
-        <div id="full-map"></div>
-        
-        <aside class="floating-dashboard">
-            <div class="logo">
-                <span>FloodRisk<span class="text-primary">Map</span></span>
-            </div>
+<div class="layout">
 
-            <form method="POST" class="search-form">
-                <input type="hidden" name="lat" id="lat">
-                <input type="hidden" name="lon" id="lon">
-                <div class="search-input-group">
-                    <input list="pak-cities" name="city" id="cityInput" placeholder="Search City or click anywhere on the map..." value="{{ city if not city.startswith('Location') else '' }}" required>
+    <!-- ═══ FULL-SCREEN MAP ═══ -->
+    <div id="full-map"></div>
+
+    <!-- ═══ SIDEBAR PANEL ═══ -->
+    <aside class="sidebar" id="sidebar">
+
+        <!-- Header -->
+        <div class="sidebar-header">
+            <div class="logo">
+                <span class="logo-icon">🌊</span>
+                <span class="logo-text">FloodRisk<span class="logo-pk">PK</span></span>
+            </div>
+            <div class="sidebar-date">{{ today_str }}</div>
+        </div>
+
+        <!-- Search -->
+        <form method="POST" class="search-form" id="searchForm">
+            <input type="hidden" name="lat" id="lat">
+            <input type="hidden" name="lon" id="lon">
+            <div class="search-row">
+                <div class="search-input-wrap">
+                    <span class="search-icon">🔍</span>
+                    <input
+                        list="pak-cities"
+                        name="city"
+                        id="cityInput"
+                        placeholder="Search city, town or village..."
+                        value="{{ city if not city.startswith('Lat:') else '' }}"
+                        autocomplete="off"
+                    >
                     <datalist id="pak-cities">
                         {% for c in cities %}<option value="{{ c }}">{% endfor %}
                     </datalist>
                 </div>
-                <button type="submit" class="btn-primary">Analyze Location</button>
-            </form>
-
-            {% if error %}
-            <div class="error-card mt-3">
-                <p>Location not found. Click on the map to select a valid coordinate in Pakistan.</p>
+                <button type="submit" class="btn-search" id="searchBtn" title="Analyze">
+                    <span id="btnText">→</span>
+                </button>
             </div>
-            {% else %}
-            
-            <div class="dashboard-content mt-3">
-                <h2 class="location-title">{{ city }}</h2>
-                <div class="date-display">{{ today }}</div>
-                
-                <div class="card risk-card {{ color_class }}">
-                    <div class="card-header">Flood & Disaster Risk</div>
-                    <div class="risk-value">
-                        <span class="val">{{ risk_percentage }}</span><span class="unit">%</span>
-                    </div>
-                    <div class="impact-badge">{{ impact_text }}</div>
-                </div>
+        </form>
 
-                <div class="stats-grid">
-                    <div class="stat-box">
-                        <div class="s-label">TEMP</div>
-                        <div class="s-val">{{ temp }}°C</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="s-label">HUMIDITY</div>
-                        <div class="s-val">{{ humidity }}%</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="s-label">RAINFALL</div>
-                        <div class="s-val">{{ rainfall }} mm</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="s-label">DISCHARGE</div>
-                        <div class="s-val">{{ river_discharge }} m³/s</div>
-                    </div>
-                </div>
+        {% if error %}
+        <!-- Error state -->
+        <div class="error-card">
+            <div class="error-icon">⚠️</div>
+            <div class="error-title">Location Not Found</div>
+            <div class="error-msg">Try searching another city, or click directly on the Pakistan map.</div>
+        </div>
 
-                <div class="card chart-card">
-                    <div class="card-header">5-Day Temperature Forecast</div>
-                    <div class="chart-wrapper">
-                        <canvas id="mainChart"></canvas>
-                    </div>
+        {% else %}
+        <!-- ═══ DATA PANEL ═══ -->
+        <div class="data-panel">
+
+            <!-- Location header -->
+            <div class="location-header">
+                <div class="location-name">{{ city }}</div>
+                <div class="location-sub">
+                    {{ data.elevation | int }}m elevation
+                    {% if data.is_monsoon %}<span class="monsoon-badge">🌧️ Monsoon Season</span>{% endif %}
                 </div>
             </div>
-            {% endif %}
-        </aside>
+
+            <!-- TODAY'S RISK CARD -->
+            <div class="risk-card {{ data.today.risk_css }}" id="riskCard">
+                <div class="risk-header">TODAY'S FLOOD RISK</div>
+                <div class="risk-main">
+                    <div class="risk-gauge-wrap">
+                        <svg class="risk-gauge" viewBox="0 0 120 120">
+                            <circle class="gauge-track" cx="60" cy="60" r="50" fill="none" stroke-width="10"/>
+                            <circle class="gauge-fill" cx="60" cy="60" r="50" fill="none" stroke-width="10"
+                                stroke="{{ data.today.risk_color }}"
+                                stroke-dasharray="{{ (data.today.risk_pct / 100) * 314.16 }} 314.16"
+                                stroke-dashoffset="78.54"
+                                stroke-linecap="round"
+                                transform="rotate(-90 60 60)"/>
+                            <text x="60" y="56" text-anchor="middle" class="gauge-num" fill="{{ data.today.risk_color }}">{{ data.today.risk_pct }}</text>
+                            <text x="60" y="72" text-anchor="middle" class="gauge-pct" fill="{{ data.today.risk_color }}">%</text>
+                        </svg>
+                    </div>
+                    <div class="risk-info">
+                        <div class="risk-badge {{ data.today.risk_css }}">
+                            {{ data.today.risk_icon }} {{ data.today.risk_label }} Risk
+                        </div>
+                        <div class="risk-advice">{{ data.today.advice }}</div>
+                        <div class="risk-stats-mini">
+                            <span>💧 {{ data.today.precipitation }} mm rain</span>
+                            <span>🌊 {{ data.today.discharge }} m³/s</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- WEATHER STATS GRID -->
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <div class="stat-icon">🌡️</div>
+                    <div class="stat-val">{{ data.today.temp_max }}°C</div>
+                    <div class="stat-label">Max Temp</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-icon">💧</div>
+                    <div class="stat-val">{{ data.today.humidity }}%</div>
+                    <div class="stat-label">Humidity</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-icon">💨</div>
+                    <div class="stat-val">{{ data.today.wind }} km/h</div>
+                    <div class="stat-label">Wind</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-icon">🏔️</div>
+                    <div class="stat-val">{{ data.today.soil_moisture }}%</div>
+                    <div class="stat-label">Soil Moisture</div>
+                </div>
+            </div>
+
+            <!-- DUAL CHART: Rainfall + Discharge -->
+            <div class="chart-card">
+                <div class="chart-title">
+                    <span>15-Day Rainfall & River Discharge</span>
+                    <div class="chart-legend">
+                        <span class="legend-dot" style="background:#38bdf8"></span><span>Rain (mm)</span>
+                        <span class="legend-dot" style="background:#f97316"></span><span>Discharge</span>
+                    </div>
+                </div>
+                <div class="chart-wrap">
+                    <canvas id="forecastChart"></canvas>
+                </div>
+            </div>
+
+            <!-- 15-DAY FORECAST CARDS -->
+            <div class="forecast-section">
+                <div class="section-title">📅 15-Day Flood Risk Forecast</div>
+                <div class="forecast-list">
+                    {% for day in data.forecast %}
+                    <div class="forecast-row {% if day.is_today %}today-row{% endif %}">
+                        <div class="fday-label">
+                            <div class="fday-name">{{ day.day }}</div>
+                            <div class="fday-date">{{ day.date_label }}</div>
+                        </div>
+                        <div class="fday-weather">
+                            <span class="fday-rain" title="Daily Rainfall">💧{{ day.precipitation }}mm</span>
+                            <span class="fday-temp">{{ day.temp_max }}°</span>
+                        </div>
+                        <div class="fday-bar-wrap" title="{{ day.risk_pct }}% risk">
+                            <div class="fday-bar" style="width: {{ day.risk_pct }}%; background: {{ day.risk_color }}"></div>
+                        </div>
+                        <div class="fday-pct {{ day.risk_css }}">{{ day.risk_pct }}%</div>
+                        <div class="fday-badge {{ day.risk_css }}">{{ day.risk_icon }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+
+            <!-- DISCHARGE TABLE -->
+            <div class="discharge-card">
+                <div class="section-title">🌊 River Discharge Forecast</div>
+                <table class="discharge-table">
+                    <thead>
+                        <tr><th>Date</th><th>Discharge</th><th>Mean</th><th>Ratio</th><th>Risk</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for day in data.forecast[:7] %}
+                        <tr class="{{ day.risk_css }}-row">
+                            <td>{{ day.date_label }}</td>
+                            <td>{{ day.discharge }} m³/s</td>
+                            <td>{{ day.dis_mean }} m³/s</td>
+                            <td class="{{ day.risk_css }}">{{ day.discharge_ratio }}×</td>
+                            <td><span class="badge-sm {{ day.risk_css }}">{{ day.risk_label }}</span></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+        </div><!-- end data-panel -->
+        {% endif %}
+
+        <div class="sidebar-footer">
+            Powered by Open-Meteo · NDMA Pakistan · AI Model
+        </div>
+
+    </aside>
+</div><!-- end layout -->
+
+<script>
+// ─── MAP SETUP ────────────────────────────────────────────────────────────────
+const initLat = {{ map_lat if map_lat else 30.3753 }};
+const initLon = {{ map_lon if map_lon else 69.3451 }};
+const zoom    = {{ '11' if not error else '5' }};
+
+const map = L.map('full-map', { zoomControl: false })
+             .setView([initLat, initLon], zoom);
+
+L.control.zoom({ position: 'topright' }).addTo(map);
+
+// Dark map tiles
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://carto.com/">CARTO</a>',
+    subdomains: 'abcd',
+    maxZoom: 19
+}).addTo(map);
+
+{% if not error %}
+// ─── MARKER ───────────────────────────────────────────────────────────────────
+const riskColor = '{{ data.today.risk_color }}';
+const riskLabel = '{{ data.today.risk_label }}';
+const riskPct   = {{ data.today.risk_pct }};
+
+// Pulsing circle
+const pulseIcon = L.divIcon({
+    className: '',
+    html: `<div class="pulse-marker" style="--mc:${riskColor}">
+               <div class="pulse-ring"></div>
+               <div class="pulse-core"></div>
+               <div class="pulse-label">${riskPct}%</div>
+           </div>`,
+    iconSize: [80, 80],
+    iconAnchor: [40, 40],
+});
+
+const marker = L.marker([initLat, initLon], { icon: pulseIcon }).addTo(map);
+marker.bindPopup(`
+    <div style="font-family:Inter,sans-serif;min-width:180px">
+        <b style="font-size:15px">{{ city }}</b><br>
+        <span style="color:${riskColor};font-weight:700;font-size:22px">${riskPct}%</span>
+        <span style="color:#999"> flood risk</span><br>
+        <span style="font-size:12px;color:#666">{{ data.today.advice }}</span>
     </div>
+`, { maxWidth: 250 }).openPopup();
 
-    <script>
-        // Full Screen Map Initialization
-        const initLat = {{ map_lat if map_lat else 30.3753 }};
-        const initLon = {{ map_lon if map_lon else 69.3451 }};
-        const zoomLvl = {{ '12' if city and not error else '6' }};
-        
-        const map = L.map('full-map', { zoomControl: false }).setView([initLat, initLon], zoomLvl);
-        
-        // Add zoom control to top right so it's not hidden by dashboard
-        L.control.zoom({ position: 'topright' }).addTo(map);
-        
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-            maxZoom: 18,
-            attribution: '© OpenStreetMap'
-        }).addTo(map);
+// 15-day risk markers (smaller)
+{% for day in data.forecast[1:] %}
+L.circleMarker([initLat + {{ loop.index }} * 0.01, initLon], {
+    radius: 0, opacity: 0
+}).addTo(map); // placeholder (no visual clutter for multi-day)
+{% endfor %}
+{% endif %}
 
-        {% if not error and city %}
-        // Add a marker for the current location with risk color
-        let markerColor = '#10b981'; // low
-        {% if color_class == 'high-risk' %} markerColor = '#ef4444'; {% endif %}
-        {% if color_class == 'mod-risk' %} markerColor = '#f59e0b'; {% endif %}
-        
-        const circle = L.circle([initLat, initLon], {
-            color: markerColor,
-            fillColor: markerColor,
-            fillOpacity: 0.4,
-            radius: 5000 // 5km radius
-        }).addTo(map);
-        
-        circle.bindPopup("<b>{{ city }}</b><br>{{ impact_text }}").openPopup();
-        {% endif %}
+// ─── MAP CLICK ────────────────────────────────────────────────────────────────
+map.on('click', function(e) {
+    document.getElementById('lat').value = e.latlng.lat.toFixed(6);
+    document.getElementById('lon').value = e.latlng.lng.toFixed(6);
+    document.getElementById('cityInput').value = `Lat: ${e.latlng.lat.toFixed(4)}, Lon: ${e.latlng.lng.toFixed(4)}`;
+    document.getElementById('btnText').textContent = '⏳';
+    document.getElementById('searchBtn').disabled = true;
+    document.getElementById('searchForm').submit();
+});
 
-        // Handle Map Clicks
-        map.on('click', function(e) {
-            document.getElementById('lat').value = e.latlng.lat;
-            document.getElementById('lon').value = e.latlng.lng;
-            document.getElementById('cityInput').value = `Lat: ${e.latlng.lat.toFixed(4)}, Lon: ${e.latlng.lng.toFixed(4)}`;
-            
-            const btn = document.querySelector('.btn-primary');
-            btn.innerHTML = 'Assessing...';
-            btn.style.opacity = '0.7';
-            
-            document.querySelector('.search-form').submit();
-        });
+document.getElementById('searchForm').addEventListener('submit', function() {
+    document.getElementById('btnText').textContent = '⏳';
+    document.getElementById('searchBtn').disabled = true;
+});
 
-        {% if not error %}
-        // Chart Initialization
-        const ctx = document.getElementById('mainChart').getContext('2d');
-        const fData = {{ forecast | tojson if forecast else '[]' }};
-        
-        Chart.defaults.font.family = 'Outfit';
-        Chart.defaults.color = '#475569';
-        
-        new Chart(ctx, {
-            type: 'line',
-            data: {
-                labels: fData.map(d => new Date(d.day*1000).toLocaleDateString('en-US',{weekday:'short'})),
-                datasets: [{
-                    label: 'Temp (°C)',
-                    data: fData.map(d => d.temp),
-                    borderColor: '#3b82f6',
-                    backgroundColor: 'rgba(59, 130, 246, 0.1)',
-                    borderWidth: 2,
-                    pointRadius: 3,
-                    fill: true, 
-                    tension: 0.4
-                }]
+{% if not error %}
+// ─── CHART ────────────────────────────────────────────────────────────────────
+const forecastData = {{ data.forecast | tojson }};
+const labels    = forecastData.map(d => d.day + ' ' + d.date_label);
+const rainData  = forecastData.map(d => d.precipitation);
+const disData   = forecastData.map(d => d.discharge);
+const riskData  = forecastData.map(d => d.risk_pct);
+const bgColors  = forecastData.map(d => d.risk_color + '99');
+
+const ctx = document.getElementById('forecastChart').getContext('2d');
+
+Chart.defaults.font.family = 'Inter, sans-serif';
+Chart.defaults.color = '#94a3b8';
+
+new Chart(ctx, {
+    data: {
+        labels: labels,
+        datasets: [
+            {
+                type: 'bar',
+                label: 'Rainfall (mm)',
+                data: rainData,
+                backgroundColor: 'rgba(56, 189, 248, 0.6)',
+                borderColor: '#38bdf8',
+                borderWidth: 1,
+                yAxisID: 'y',
+                order: 2,
             },
-            options: { 
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { display: false } },
-                scales: { 
-                    x: { grid: { display: false } }, 
-                    y: { grid: { color: 'rgba(0, 0, 0, 0.05)' } } 
-                }
+            {
+                type: 'line',
+                label: 'River Discharge (m³/s)',
+                data: disData,
+                borderColor: '#f97316',
+                backgroundColor: 'rgba(249, 115, 22, 0.1)',
+                borderWidth: 2,
+                pointRadius: 3,
+                pointBackgroundColor: '#f97316',
+                fill: false,
+                tension: 0.4,
+                yAxisID: 'y1',
+                order: 1,
+            },
+        ]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                backgroundColor: 'rgba(15,23,42,0.95)',
+                titleFont: { size: 12, weight: '600' },
+                bodyFont: { size: 11 },
+                padding: 10,
+                borderColor: 'rgba(255,255,255,0.1)',
+                borderWidth: 1,
             }
-        });
-        {% endif %}
-    </script>
+        },
+        scales: {
+            x: {
+                grid: { color: 'rgba(255,255,255,0.05)' },
+                ticks: { maxTicksLimit: 7, font: { size: 10 } }
+            },
+            y: {
+                position: 'left',
+                grid: { color: 'rgba(255,255,255,0.05)' },
+                title: { display: true, text: 'Rain (mm)', color: '#38bdf8', font: { size: 10 } },
+            },
+            y1: {
+                position: 'right',
+                grid: { drawOnChartArea: false },
+                title: { display: true, text: 'm³/s', color: '#f97316', font: { size: 10 } },
+            }
+        }
+    }
+});
+{% endif %}
+</script>
 </body>
 </html>

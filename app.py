@@ -1,197 +1,304 @@
+"""
+app.py – Pakistan Flood Risk & Disaster Prediction System
+Uses Open-Meteo (free, no API key) for all weather + flood data.
+Provides 15-day per-day flood risk predictions using the trained ML model.
+"""
+
 from flask import Flask, render_template, request
 import joblib, json, requests, numpy as np
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 app = Flask(__name__)
 
-model = joblib.load("model.pkl")
-scaler = joblib.load("scaler.pkl")
+# ── Load model artifacts ──────────────────────────────────────────────────────
+model         = joblib.load("model.pkl")
+scaler        = joblib.load("scaler.pkl")
 feature_names = joblib.load("feature_names.pkl")
 
-with open('pakistan_cities.json', 'r', encoding='utf-8') as f:
+# ── Cities list ───────────────────────────────────────────────────────────────
+with open("pakistan_cities.json", "r", encoding="utf-8") as f:
     ALL_CITIES = sorted(json.load(f))
 
-API_KEY = "133d554dfa4a38e05d6c80341e71458d"
+PKT = timezone(timedelta(hours=5))  # Pakistan Standard Time
 
-def fetch_flood_risk(city, lat=None, lon=None):
-    name = city
-    elevation = 100.0
-    
-    # 1. Geocoding for small villages
-    if not (lat and lon):
-        query = city.strip()
-        om_url = f"https://geocoding-api.open-meteo.com/v1/search?name={query}&count=1&language=en&format=json"
-        try:
-            om_r = requests.get(om_url).json()
-            if om_r.get("results"):
-                lat = om_r["results"][0]["latitude"]
-                lon = om_r["results"][0]["longitude"]
-                name = om_r["results"][0]["name"]
-        except Exception:
-            pass
+def is_monsoon_season():
+    return 6 <= datetime.now(PKT).month <= 9
 
-    # 2. Dynamic Elevation Data
-    if lat and lon:
-        try:
-            e_url = f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}"
-            e_r = requests.get(e_url).json()
-            if "elevation" in e_r and e_r["elevation"]:
-                elevation = e_r["elevation"][0]
-        except Exception:
-            pass
-
-    # 3. Weather Data (OpenWeatherMap)
-    if lat and lon:
-        url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&appid={API_KEY}&units=metric"
-    else:
-        query = city.strip()
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={query},PK&appid={API_KEY}&units=metric"
-        
+def geocode_nominatim(name: str):
+    """Geocode using Nominatim with Pakistan country filter."""
     try:
-        w_r = requests.get(url).json()
+        url = (
+            f"https://nominatim.openstreetmap.org/search"
+            f"?q={requests.utils.quote(name)}&countrycodes=pk"
+            f"&format=json&limit=1&addressdetails=1"
+        )
+        r = requests.get(url, timeout=10,
+                         headers={"User-Agent": "FloodRiskPK/2.0"}).json()
+        if r:
+            addr = r[0].get("address", {})
+            display = (addr.get("city") or addr.get("town") or
+                       addr.get("village") or addr.get("county") or name)
+            return float(r[0]["lat"]), float(r[0]["lon"]), display
+    except Exception:
+        pass
+    # Fallback: Open-Meteo geocoding
+    try:
+        url = (
+            f"https://geocoding-api.open-meteo.com/v1/search"
+            f"?name={requests.utils.quote(name + ' Pakistan')}&count=1&language=en&format=json"
+        )
+        r = requests.get(url, timeout=10).json()
+        if r.get("results"):
+            res = r["results"][0]
+            return res["latitude"], res["longitude"], res.get("name", name)
+    except Exception:
+        pass
+    return None, None, name
+
+def reverse_geocode(lat, lon):
+    try:
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
+        r = requests.get(url, timeout=8,
+                         headers={"User-Agent": "FloodRiskPK/2.0"}).json()
+        addr = r.get("address", {})
+        return (addr.get("village") or addr.get("town") or addr.get("city")
+                or addr.get("county") or f"{float(lat):.4f}N, {float(lon):.4f}E")
+    except Exception:
+        return f"{float(lat):.4f}N, {float(lon):.4f}E"
+
+def get_elevation(lat, lon):
+    try:
+        r = requests.get(
+            f"https://api.open-meteo.com/v1/elevation?latitude={lat}&longitude={lon}",
+            timeout=8).json()
+        elev = r.get("elevation", [100.0])
+        return float(elev[0]) if elev else 100.0
+    except Exception:
+        return 100.0
+
+def predict_risk_day(elevation, precipitation, rain_7d, wind,
+                     discharge, dis_mean, dis_max, discharge_ratio):
+    """Predict flood risk for a single day."""
+    features = {
+        "elevation":            elevation,
+        "precipitation":        precipitation,
+        "rain_sum_7d":          rain_7d,
+        "wind_speed":           wind,
+        "river_discharge":      discharge,
+        "river_discharge_mean": dis_mean,
+        "river_discharge_max":  dis_max,
+        "discharge_ratio":      discharge_ratio,
+    }
+    feat_vec = [features.get(f, 0.0) for f in feature_names]
+    scaled   = scaler.transform([feat_vec])
+    cls      = int(model.predict(scaled)[0])
+    probs    = model.predict_proba(scaled)[0].tolist()
+    return cls, probs
+
+RISK_META = {
+    0: {"label": "Safe",     "color": "#10b981", "css": "low-risk",  "icon": "✅",
+        "advice": "No immediate flood threat. Stay informed about local forecasts."},
+    1: {"label": "Moderate", "color": "#f59e0b", "css": "mod-risk",  "icon": "⚠️",
+        "advice": "Waterlogging possible. Avoid underpasses and low-lying areas."},
+    2: {"label": "Severe",   "color": "#ef4444", "css": "high-risk", "icon": "🚨",
+        "advice": "High flood risk! Evacuate flood plains. Move to higher ground immediately."},
+}
+
+def risk_percentage(cls, probs):
+    if cls == 0:
+        return min(round(probs[1] * 100 + probs[2] * 50, 1), 29.9)
+    elif cls == 1:
+        return max(min(round((probs[1] + probs[2]) * 100, 1), 69.9), 30.0)
+    else:
+        return max(round(probs[2] * 100, 1), 70.0)
+
+def fetch_all(city_name, lat=None, lon=None):
+    display_name = city_name
+    elevation    = 100.0
+
+    if lat and lon:
+        try:
+            lat, lon = float(lat), float(lon)
+            elevation    = get_elevation(lat, lon)
+            display_name = reverse_geocode(lat, lon)
+        except ValueError:
+            lat = lon = None
+
+    if not (lat and lon):
+        lat, lon, display_name = geocode_nominatim(city_name)
+        if lat is None:
+            return None
+        elevation = get_elevation(lat, lon)
+
+    # ── 15-day forecast (past 7 days for rolling rain_7d context) ─────────────
+    # Only VALID Open-Meteo daily variables
+    weather_url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        f"&daily=precipitation_sum,wind_speed_10m_max,temperature_2m_max,temperature_2m_min"
+        f"&hourly=relative_humidity_2m"
+        f"&past_days=7&forecast_days=15&timezone=Asia%2FKarachi"
+    )
+    flood_url = (
+        f"https://flood-api.open-meteo.com/v1/flood"
+        f"?latitude={lat}&longitude={lon}"
+        f"&daily=river_discharge,river_discharge_mean,river_discharge_max,"
+        f"river_discharge_min,river_discharge_median"
+        f"&past_days=7&forecast_days=15"
+    )
+
+    try:
+        wr = requests.get(weather_url, timeout=15).json()
+        fr = requests.get(flood_url,   timeout=15).json()
     except Exception:
         return None
-    
-    if str(w_r.get("cod")) != "200":
+
+    if "daily" not in wr:
         return None
-        
-    if "name" in w_r and w_r["name"]:
-        name = w_r['name']
-    
-    # If clicked on map, name might be "Lat: ..., Lon: ...", we should fetch a proper reverse geocode or stick to it
-    if name.startswith("Lat:"):
+
+    wd = wr["daily"]
+    dates      = wd.get("time", [])
+    precip_raw = wd.get("precipitation_sum",  [0] * len(dates))
+    wind_raw   = wd.get("wind_speed_10m_max", [0] * len(dates))
+    temp_max   = wd.get("temperature_2m_max", [30] * len(dates))
+    temp_min   = wd.get("temperature_2m_min", [20] * len(dates))
+
+    # ── Hourly humidity → daily average ───────────────────────────────────────
+    hourly_data = wr.get("hourly", {})
+    hourly_times = hourly_data.get("time", [])
+    hourly_hum   = hourly_data.get("relative_humidity_2m", [])
+    # Build date→avg humidity map
+    hum_by_date = {}
+    for i, ts in enumerate(hourly_times):
+        d = ts[:10]  # "YYYY-MM-DD"
+        val = float(hourly_hum[i]) if i < len(hourly_hum) and hourly_hum[i] is not None else 60.0
+        hum_by_date.setdefault(d, []).append(val)
+    hum_daily = {d: sum(v)/len(v) for d, v in hum_by_date.items()}
+
+    # ── Flood data (may be missing for areas without river gauges) ─────────────
+    fd = fr.get("daily", {}) if "daily" in fr else {}
+    dates_f  = fd.get("time", [])
+    disc_arr = fd.get("river_discharge",        [])
+    dmean    = fd.get("river_discharge_mean",   [])
+    dmax_arr = fd.get("river_discharge_max",    [])
+    dmin_arr = fd.get("river_discharge_min",    [])
+    dmed_arr = fd.get("river_discharge_median", [])
+
+    def safe_float(arr, i, default=0.0):
+        return float(arr[i]) if i < len(arr) and arr[i] is not None else default
+
+    # Build flood lookup by date
+    flood_by_date = {}
+    for i, fd_date in enumerate(dates_f):
+        flood_by_date[fd_date] = {
+            "discharge": safe_float(disc_arr, i),
+            "dis_mean":  safe_float(dmean,    i, 0.001),
+            "dis_max":   safe_float(dmax_arr, i, 0.001),
+            "dis_min":   safe_float(dmin_arr, i),
+            "dis_med":   safe_float(dmed_arr, i),
+        }
+
+    # Rolling 7-day precipitation
+    precip_arr  = np.array([p if p is not None else 0.0 for p in precip_raw], dtype=float)
+    rain_7d_all = np.array([
+        float(np.sum(precip_arr[max(0, i-6):i+1]))
+        for i in range(len(precip_arr))
+    ])
+
+    today_str     = datetime.now(PKT).strftime("%Y-%m-%d")
+    forecast_days = []
+
+    for i, date_str in enumerate(dates):
+        if date_str < today_str:
+            continue
+        if len(forecast_days) >= 15:
+            break
+
+        p   = float(precip_raw[i]) if precip_raw[i] is not None else 0.0
+        w   = float(wind_raw[i])   if wind_raw[i]   is not None else 0.0
+        tx  = float(temp_max[i])   if temp_max[i]   is not None else 30.0
+        tn  = float(temp_min[i])   if temp_min[i]   is not None else 20.0
+        r7  = float(rain_7d_all[i])
+        hum = round(hum_daily.get(date_str, 65.0), 1)
+
+        fld  = flood_by_date.get(date_str, {})
+        d    = fld.get("discharge", 0.0)
+        dm   = fld.get("dis_mean",  0.001)
+        dmax = fld.get("dis_max",   0.001)
+        dmin = fld.get("dis_min",   0.0)
+        dmed = fld.get("dis_med",   0.0)
+        dratio = d / max(dm, 0.001) if d > 0 else 0.0
+
+        cls, probs = predict_risk_day(elevation, p, r7, w, d, dm, dmax, dratio)
+        pct        = risk_percentage(cls, probs)
+        meta       = RISK_META[cls]
+
         try:
-            rg_url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json"
-            headers = {'User-Agent': 'FloodRiskApp/1.0'}
-            rg_r = requests.get(rg_url, headers=headers).json()
-            if 'address' in rg_r:
-                addr = rg_r['address']
-                name = addr.get('village', addr.get('town', addr.get('city', addr.get('county', name))))
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            day_label  = dt.strftime("%a")
+            date_label = dt.strftime("%d %b")
         except Exception:
-            pass
+            day_label  = "—"
+            date_label = date_str
 
-    lat = w_r['coord']['lat']
-    lon = w_r['coord']['lon']
-    temp = w_r['main']['temp']
-    humidity = w_r['main']['humidity']
-    wind = w_r['wind']['speed']
-    
-    # Check rainfall (if any)
-    rainfall = 0
-    if 'rain' in w_r and '1h' in w_r['rain']:
-        rainfall = w_r['rain']['1h']
-        
-    # 5-Day Forecast Data for Chart
-    f_url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&appid={API_KEY}&units=metric"
-    f_res = requests.get(f_url).json()
-    forecast = []
-    if 'list' in f_res:
-        forecast = [{"day": e['dt'], "temp": e['main']['temp'], "rain": e.get('rain', {}).get('3h', 0)} for e in f_res['list'][::8]]
+        forecast_days.append({
+            "date":          date_str,
+            "day":           day_label,
+            "date_label":    date_label,
+            "is_today":      (date_str == today_str),
+            "temp_max":      round(tx, 1),
+            "temp_min":      round(tn, 1),
+            "humidity":      hum,
+            "precipitation": round(p, 1),
+            "rain_7d":       round(r7, 1),
+            "wind":          round(w, 1),
+            "discharge":     round(d, 1),
+            "dis_mean":      round(dm, 1),
+            "dis_max":       round(dmax, 1),
+            "dis_min":       round(dmin, 1),
+            "dis_median":    round(dmed, 1),
+            "discharge_ratio": round(dratio, 2),
+            "risk_pct":      pct,
+            "risk_class":    cls,
+            "risk_label":    meta["label"],
+            "risk_color":    meta["color"],
+            "risk_css":      meta["css"],
+            "risk_icon":     meta["icon"],
+            "advice":        meta["advice"],
+        })
 
-    # 2. Flood Data (Open-Meteo)
-    flood_url = f"https://flood-api.open-meteo.com/v1/flood?latitude={lat}&longitude={lon}&daily=river_discharge,river_discharge_mean,river_discharge_median,river_discharge_max,river_discharge_min&forecast_days=14"
-    f_r = requests.get(flood_url).json()
-    
-    max_forecast_discharge = 0
-    mean_discharge = 0
-    historical_max = 0
-    historical_min = 0
-    median_discharge = 0
-    
-    if "daily" in f_r:
-        daily_flood = f_r["daily"]
-        discharges = [x for x in daily_flood.get("river_discharge", [])[:5] if x is not None]
-        if discharges:
-            max_forecast_discharge = max(discharges)
-        
-        mean_d = [x for x in daily_flood.get("river_discharge_mean", [])[:5] if x is not None]
-        if mean_d:
-            mean_discharge = sum(mean_d) / len(mean_d)
-            
-        max_d = [x for x in daily_flood.get("river_discharge_max", [])[:5] if x is not None]
-        if max_d:
-            historical_max = max(max_d)
-            
-        min_d = [x for x in daily_flood.get("river_discharge_min", [])[:5] if x is not None]
-        if min_d:
-            historical_min = min(min_d)
-            
-        med_d = [x for x in daily_flood.get("river_discharge_median", [])[:5] if x is not None]
-        if med_d:
-            median_discharge = sum(med_d) / len(med_d)
-            
-    features = {
-        'elevation': elevation,
-        'river_discharge': max_forecast_discharge,
-        'river_discharge_mean': mean_discharge,
-        'river_discharge_median': median_discharge,
-        'river_discharge_max': historical_max,
-        'river_discharge_min': historical_min
+    if not forecast_days:
+        return None
+
+    return {
+        "name":       display_name,
+        "lat":        lat,
+        "lon":        lon,
+        "elevation":  round(elevation, 0),
+        "is_monsoon": is_monsoon_season(),
+        "today":      forecast_days[0],
+        "forecast":   forecast_days,
     }
-    
-    feature_values = [features.get(f, 0) for f in feature_names]
-    
-    return feature_values, name, temp, humidity, wind, rainfall, forecast, lat, lon
 
 @app.route("/", methods=["GET", "POST"])
 def home():
-    city = request.form.get("city", "Lahore")
-    lat = request.form.get("lat")
-    lon = request.form.get("lon")
-    
-    result = fetch_flood_risk(city, lat, lon)
-    today = datetime.now().strftime("%A, %d %B")
+    city    = request.form.get("city", "Lahore")
+    lat     = request.form.get("lat")
+    lon     = request.form.get("lon")
+    now_str = datetime.now(PKT).strftime("%A, %d %B %Y")
 
-    if not result:
-        return render_template("index.html", error=True, cities=ALL_CITIES, city=city, today=today, map_lat=30.3753, map_lon=69.3451)
+    data = fetch_all(city, lat, lon)
 
-    feats, name, temp, humidity, wind, rainfall, forecast, r_lat, r_lon = result
-    
-    # AI Prediction
-    scaled_feats = scaler.transform([feats])
-    impact_class = model.predict(scaled_feats)[0]
-    probs = model.predict_proba(scaled_feats)[0]
-    
-    # Adjust logic: if rainfall is high, override model for safety
-    if rainfall > 10.0:
-        impact_class = 2
-        probs = [0.0, 0.1, 0.9]
-    elif rainfall > 2.0 and impact_class == 0:
-        impact_class = 1
-        probs = [0.2, 0.7, 0.1]
-        
-    if impact_class == 2:
-        risk_percentage = round(probs[2] * 100, 1)
-        impact_text = "Severe Flood Risk - Heavy Rain/Discharge"
-        color_class = "high-risk"
-    elif impact_class == 1:
-        risk_percentage = round((probs[1] + probs[2]) * 100, 1)
-        impact_text = "Moderate Risk - Waterlogging Possible"
-        color_class = "mod-risk"
-    else:
-        risk_percentage = round(probs[1] * 100, 1)
-        impact_text = "Safe - No Immediate Threat"
-        color_class = "low-risk"
-        
-    if impact_class == 0 and risk_percentage > 30: risk_percentage = 30.0
-    if impact_class == 1 and risk_percentage < 30: risk_percentage = 35.0
-    if impact_class == 2 and risk_percentage < 70: risk_percentage = 75.0
+    if not data:
+        return render_template("index.html", error=True,
+                               cities=ALL_CITIES, city=city,
+                               today_str=now_str,
+                               map_lat=30.3753, map_lon=69.3451)
 
-    return render_template("index.html", 
-                           city=name, 
-                           temp=round(temp), 
-                           humidity=round(humidity), 
-                           wind=round(wind),
-                           rainfall=rainfall,
-                           forecast=forecast, 
-                           cities=ALL_CITIES, 
-                           today=today,
-                           risk_percentage=risk_percentage,
-                           impact_text=impact_text,
-                           color_class=color_class,
-                           river_discharge=round(feats[1], 2),
-                           map_lat=r_lat,
-                           map_lon=r_lon)
+    return render_template("index.html", error=False,
+                           cities=ALL_CITIES, city=data["name"],
+                           today_str=now_str, data=data,
+                           map_lat=data["lat"], map_lon=data["lon"])
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)
